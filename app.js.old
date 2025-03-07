@@ -1,0 +1,202 @@
+require('dotenv').config();
+const axios = require('axios');
+const fs = require('fs');
+const { createCanvas, loadImage } = require('canvas');
+
+const height = 2556;
+const width = 1179;
+const canvas = createCanvas(width, height);
+const ctx = canvas.getContext('2d');
+ctx.fillStyle = '#d3d3d3';
+ctx.fillRect(0, 0, width, height);
+
+const currentDate = new Date().toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric'
+});
+
+function getSectionType(line) {
+    line = line.toLowerCase().trim();
+    if (line.includes('album')) return 'Album';
+    if (line.includes('ep')) return 'EP';
+    if (line.includes('single')) return 'Single';
+    return null;
+}
+
+function parseInputFile(content) {
+    const lines = content.split('\n').map(line => line.trim()).filter(Boolean);
+    const releases = [];
+    let currentType = null;
+
+    for (const line of lines) {
+        const sectionType = getSectionType(line);
+        if (sectionType) {
+            currentType = sectionType;
+            continue;
+        }
+
+        if (line.startsWith('http')) {
+            releases.push({ url: line, type: currentType });
+        }
+    }
+    return releases;
+}
+
+function wrapText(context, text, x, y, maxWidth, lineHeight) {
+    const words = text.split(' ');
+    let line = '';
+    let lines = [];
+
+    for (let n = 0; n < words.length; n++) {
+        const testLine = line + words[n] + ' ';
+        const metrics = context.measureText(testLine);
+        const testWidth = metrics.width;
+
+        if (testWidth > maxWidth && n > 0) {
+            lines.push(line);
+            line = words[n] + ' ';
+        } else {
+            line = testLine;
+        }
+    }
+    lines.push(line);
+    return lines;
+}
+
+async function getAlbumInfo(release) {
+    const albumParts = release.url.split('/');
+    const artist = decodeURIComponent(albumParts[4].replace(/\+/g, ' '));
+    const album = decodeURIComponent(albumParts[5].replace(/\+/g, ' ')).replace(/\[.*?\]/g, '');
+    const apiUrl = `http://ws.audioscrobbler.com/2.0/?method=album.getinfo&api_key=${process.env.LASTFM_API_KEY}&artist=${artist}&album=${album}&format=json`;
+
+    try {
+        const response = await axios.get(apiUrl);
+        const { album: albumData } = response.data;
+
+        const tags = (albumData.tags.tag || []).map(tag => tag.name)
+            .filter(tag => !['ep', 'single', 'album'].includes(tag.toLowerCase()))
+            .map(tag => tag.charAt(0).toUpperCase() + tag.slice(1).toLowerCase());
+
+        return {
+            artist: albumData.artist,
+            title: albumData.name,
+            tags: tags.join(', ') || 'No tags',
+            imageUrl: albumData.image.find(img => img.size === 'large')?.['#text'],
+            releaseType: release.type
+        };
+    } catch (error) {
+        console.error(`Failed to fetch data for album: ${release.url}`, error.message);
+        return null;
+    }
+}
+
+function drawTextWithOverflowCheck(ctx, text, x, y, maxWidth, initialFontSize) {
+    let fontSize = initialFontSize;
+    ctx.font = `${fontSize}px Arial`;
+    let metrics = ctx.measureText(text);
+
+    while (metrics.width > maxWidth && fontSize > 10) {
+        fontSize -= 2;
+        ctx.font = `${fontSize}px Arial`;
+        metrics = ctx.measureText(text);
+    }
+
+    ctx.fillText(text, x, y);
+    return fontSize;
+}
+
+async function drawAlbums() {
+    ctx.font = 'bold 72px sans-serif';
+    ctx.fillStyle = '#000';
+    ctx.textAlign = 'center';
+
+    const titleText = 'New Music Friday';
+    const titleLines = wrapText(ctx, titleText, width / 2, 60, width - 100, 80);
+
+    let yPosition = 240;
+    titleLines.forEach(line => {
+        ctx.fillText(line.trim(), width / 2, yPosition);
+        yPosition += 80;
+    });
+
+    ctx.font = '48px sans-serif';
+    ctx.fillText(currentDate, width / 2, yPosition + 20);
+
+    const fileContent = fs.readFileSync('input.txt', 'utf8');
+    const releases = parseInputFile(fileContent);
+
+    const albumInfos = [];
+    for (const release of releases) {
+        const info = await getAlbumInfo(release);
+        if (info) albumInfos.push(info);
+    }
+
+    const typeOrder = { 'Album': 1, 'EP': 2, 'Single': 3 };
+    albumInfos.sort((a, b) => typeOrder[a.releaseType] - typeOrder[b.releaseType] || (a.artist + a.title).localeCompare(b.artist + b.title));
+
+    const padding = 80;
+    yPosition += padding + 40;
+    ctx.textAlign = 'left';
+
+    let currentType = null;
+    for (const info of albumInfos) {
+        if (currentType !== info.releaseType) {
+            currentType = info.releaseType;
+            ctx.font = 'bold 64px sans-serif';
+            yPosition += 80;
+            ctx.fillText(currentType + 's', padding, yPosition);
+            yPosition += 80;
+        }
+
+        if (yPosition + 250 > height) break;
+
+        try {
+            if (info.imageUrl) {
+                const albumArt = await loadImage(info.imageUrl);
+                ctx.drawImage(albumArt, padding, yPosition, 200, 200);
+            } else {
+                ctx.fillStyle = '#888';
+                ctx.fillRect(padding, yPosition, 200, 200);
+                ctx.fillStyle = '#000';
+            }
+        } catch {
+            ctx.fillStyle = '#888';
+            ctx.fillRect(padding, yPosition, 200, 200);
+            ctx.fillStyle = '#000';
+        }
+
+        ctx.font = 'bold 60px sans-serif';
+        const maxTitleWidth = width - (padding + 220 + padding);
+        const titleLines = wrapText(ctx, info.title, padding + 220, yPosition + 70, maxTitleWidth, 60);
+        titleLines.forEach((line, index) => {
+            ctx.fillText(line.trim(), padding + 220, yPosition + 70 + (index * 60));
+        });
+
+        ctx.font = '40px sans-serif';
+        const artistYPosition = info.tags ? yPosition + 130 : yPosition + 190;
+        drawTextWithOverflowCheck(ctx, info.artist, padding + 220, artistYPosition, maxTitleWidth, 40);
+
+        if (info.tags) {
+            ctx.font = '32px sans-serif';
+            const tagLines = wrapText(ctx, info.tags, padding + 220, yPosition + 190, maxTitleWidth, 32);
+            tagLines.forEach((line, index) => {
+                ctx.fillText(line.trim(), padding + 220, yPosition + 190 + (index * 32));
+            });
+        }
+
+        yPosition += 280;
+    }
+
+    const buffer = canvas.toBuffer('image/jpeg');
+    fs.writeFileSync('output.jpg', buffer);
+    console.log('Updated album list image saved as output.jpg');
+}
+
+const API_KEY = process.env.LASTFM_API_KEY;
+if (!API_KEY) {
+    console.error("Last.fm API key is missing in .env file.");
+    process.exit(1);
+}
+
+drawAlbums();
